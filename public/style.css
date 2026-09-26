@@ -1,0 +1,83 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  background: #0f1720;
+  color: #e6edf3;
+  line-height: 1.55;
+}
+header {
+  padding: 20px 28px 12px;
+  border-bottom: 1px solid #243040;
+  background: #131e2b;
+}
+header h1 { font-size: 20px; margin: 0 0 6px; }
+.sub { margin: 0; color: #9fb0c3; font-size: 13px; }
+main { max-width: 1180px; margin: 20px auto; padding: 0 20px; }
+.panel {
+  background: #16222f;
+  border: 1px solid #243040;
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 18px;
+}
+.panel h2 { font-size: 15px; margin: 0 0 12px; color: #7fd1ff; }
+label { display: block; font-size: 13px; color: #9fb0c3; margin: 12px 0 4px; }
+textarea, input[type=text] {
+  width: 100%;
+  background: #0d151e;
+  color: #e6edf3;
+  border: 1px solid #2c3c4f;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  resize: vertical;
+}
+textarea:focus, input:focus { outline: none; border-color: #3b82f6; }
+.actions { margin-top: 14px; display: flex; gap: 10px; }
+button {
+  background: #2563eb;
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 14px;
+  cursor: pointer;
+}
+button:hover { background: #1d4ed8; }
+button.ghost { background: transparent; border: 1px solid #3a4b5f; color: #9fb0c3; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12.5px; }
+th, td {
+  border: 1px solid #243040;
+  padding: 8px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+th { background: #1a2836; color: #9fb0c3; font-weight: 600; }
+td code, .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.allow { color: #4ade80; font-weight: 700; }
+.deny { color: #f87171; font-weight: 700; }
+.error {
+  background: #2a1518;
+  border: 1px solid #7f2d33;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+}
+.error dl { margin: 0; display: grid; grid-template-columns: 110px 1fr; row-gap: 4px; }
+.error dt { color: #f0a3a3; }
+.error dd { margin: 0; word-break: break-all; }
+.pill {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11.5px; border: 1px solid #3a4b5f; color: #9fb0c3;
+}
+.pill.cmd { border-color: #b45309; color: #fbbf24; }
+footer {
+  max-width: 1180px; margin: 8px auto 24px; padding: 0 20px;
+  color: #64748b; font-size: 12px;
+}

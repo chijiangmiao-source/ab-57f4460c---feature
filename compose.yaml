@@ -1,0 +1,35 @@
+services:
+  gateway:
+    build: .
+    image: buoy-delegation-gateway:latest
+    container_name: buoy-gateway
+    environment:
+      # 容器内监听固定 8080；宿主机端口可配置（.env 或导出 GATEWAY_PORT）
+      PORT: "8080"
+      HOST: "0.0.0.0"
+    ports:
+      # 可配置宿主机端口：GATEWAY_PORT=9090 docker compose up
+      - "${GATEWAY_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # 一次性验收服务：复核合法链证据、越权链与篡改签名拒绝、
+  # 代码测试、页面构建检查、健康地址 API/HTTP 冒烟；执行完毕即退出，
+  # 以退出码报告验收结果（0 通过 / 非 0 失败）。
+  # 运行：docker compose run --rm verify
+  verify:
+    build: .
+    image: buoy-delegation-gateway:latest
+    command: ["node", "verify/acceptance.js"]
+    environment:
+      GATEWAY_URL: "http://gateway:8080"
+      VERIFY_PORT: "18080"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: "no"

@@ -1,0 +1,16 @@
+{
+  "name": "buoy-delegation-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "海洋观测浮标失联应急采样：离线受限委托链的逐跳核验岸站",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-concurrency=2 tests/",
+    "check:page": "node scripts/check-page.js",
+    "verify": "node verify/acceptance.js"
+  }
+}

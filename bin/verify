@@ -1,0 +1,12 @@
+#!/bin/sh
+# 名为 verify 的可执行一次性验收服务（本机直接运行）。
+# 用法：bin/verify [可选临时端口，默认 18080]
+# 退出码：0 验收通过；1 存在失败项；2 执行异常。
+# Compose 中等价服务：docker compose run --rm verify
+set -e
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "$1" ]; then
+  VERIFY_PORT="$1"
+  export VERIFY_PORT
+fi
+exec node "$DIR/verify/acceptance.js"

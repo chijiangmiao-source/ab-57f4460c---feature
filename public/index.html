@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浮标应急采样 · 受限委托链核验</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>海洋观测浮标失联应急采样 · 受限委托链核验</h1>
+  <p class="sub">岸站离线签发链逐跳验签：粘贴根公钥与按顺序排列的委托 / 末端命令（每行一份规范 JSON 对象）</p>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>输入</h2>
+    <label for="rootKey">根公钥（P-256 JWK，规范 JSON）</label>
+    <textarea id="rootKey" rows="2" spellcheck="false"
+      placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
+
+    <label for="objects">委托链对象（按顺序，每行一份：委托…→ 末端命令）</label>
+    <textarea id="objects" rows="10" spellcheck="false"
+      placeholder='{"aud":[…],"exp":…,"iss":{…},"maxSamples":…,"nbf":…,"sig":"…","sub":{…},"typ":"delegation"}'></textarea>
+
+    <label for="now">评估时刻（unix 秒，留空取服务器当前时间）</label>
+    <input id="now" type="text" inputmode="numeric" placeholder="例如 1790000000">
+
+    <div class="actions">
+      <button id="verifyBtn" type="button">逐跳核验</button>
+      <button id="clearBtn" type="button" class="ghost">清空</button>
+    </div>
+  </section>
+
+  <section class="panel" id="errorPanel" hidden>
+    <h2>拒绝原因（错误草稿，不覆盖有效证据）</h2>
+    <div id="errorBody" class="error"></div>
+  </section>
+
+  <section class="panel" id="evidencePanel" hidden>
+    <h2>逐跳证据与最终结论</h2>
+    <div id="verdict"></div>
+    <table id="hopTable">
+      <thead>
+        <tr>
+          <th>跳</th><th>类型</th><th>签名（sig）</th><th>规范载荷摘要（SHA-256）</th>
+          <th>签发者指纹</th><th>主体指纹</th><th>收紧后的约束</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="finalConstraints"></div>
+  </section>
+</main>
+
+<footer>
+  <p>规范：JCS (RFC 8785) 规范 JSON 字节 · ECDSA P-256/SHA-256（P1363）· 仅允许时间窗 / 浮标集合 / 采样上限收紧</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
