@@ -1,9 +1,16 @@
-# 浮标失联应急采样 · 受限委托链核验岸站
+# 浮标失联应急采样 · 受限委托链核验 / 容量审计岸站
 
-海洋观测浮标失联时，岸站携带**离线签发的受限委托链**下发应急采样命令。本服务对
-值班员粘贴的「根公钥 + 按顺序排列的委托 / 末端命令」按**同一套规范 JSON 字节**
-（JCS，RFC 8785）逐跳验签，确认每跳委托由前一主体签发，且时间窗、浮标集合、
-采样上限只允许收紧；对有效链展示逐跳证据与最终准许结论，对违规链给出可定位的拒绝原因。
+海洋观测浮标失联时，岸站携带**离线签发的受限委托链**下发应急采样命令。本服务提供两种核验：
+
+1. **逐跳核验（单链）**：对值班员粘贴的「根公钥 + 按顺序排列的委托 / 末端命令」按
+   **同一套规范 JSON 字节**（JCS，RFC 8785）逐跳验签，确认每跳委托由前一主体签发，
+   且时间窗、浮标集合、采样上限只允许收紧；对有效链展示逐跳证据与最终准许结论，
+   对违规链给出可定位的拒绝原因。
+2. **容量审计（委托图）**：粘贴「根公钥 + **无序**容量委托集合 + 目标主体 + 浮标 +
+   评估时刻」，服务按父摘要接成有向委托图，逐边验签、确认签发关系与约束只收紧，
+   精确计算根到目标主体的**最大可转移采样额度**（最大流），并给出按规范摘要稳定
+   排列的流量边、顶点剩余容量与**最小割**证据——失联期间该主体最多能获得多少
+   额度，一眼可知，无需逐条猜测哪一条链足够。
 
 ## 快速开始
 
@@ -74,16 +81,62 @@ npm run check:page        # 页面构建检查
 | `SAMPLES_EXCEEDED` | 采样量超过某跳上限（定位首个限制跳） |
 | `SCHEMA` / `JSON_SYNTAX` / `JSON_TRAILING` | 模式或语法错误 |
 
+## 容量委托格式（容量审计）
+
+容量委托沿用 P-256 签名与规范 JSON，在上述委托字段之外新增两个成员：
+
+```json
+{"aud":["buoy-01"],"exp":1790003600,"iss":{…},"maxSamples":50,"nbf":1789996400,"parent":"<64位hex>","sig":"…","sub":{…},"transfer":30,"typ":"delegation"}
+```
+
+| 新增字段 | 含义 |
+| --- | --- |
+| `parent` | 父载荷摘要（64 位十六进制 SHA-256，即父委托「去掉 `sig` 后规范字节」的摘要）；根出边委托填根公钥指纹 |
+| `transfer` | 本边可转移容量（int32 区间内的非负整数，且必须 ≤ 本委托 `maxSamples`） |
+
+容量模型：每条委托恰有一个 `parent`，故委托顶点入度恒为 1，按 `parent` 接出的是
+以根为起点的有根树（同一主体可在多份委托的 `sub` 处汇聚为审计汇点）。网络边容量
+取该边声明的 `transfer`，目标主体各授予顶点到超汇的容量取其 `maxSamples`；
+schema 已保证 `transfer ≤ 自身 maxSamples`，中转顶点上限不会先于其入边收口。
+根→目标主体的**最大流**即该主体在指定浮标/时刻最多可获得的可用采样额度。
+
+### 容量审计拒绝码（`node` = 根/目标/输入序号/问题委托摘要）
+
+| code | 含义 |
+| --- | --- |
+| `PARENT_NOT_FOUND` | 父摘要在集合中不存在且不等于根公钥指纹 |
+| `CYCLE_DETECTED` | 按 parent 拼接后存在环（图必须是 DAG；真实签名因摘要固定点约束无法构成环） |
+| `SUCCESSOR_ISSUER_MISMATCH` | 后继委托的签发者不是父委托的主体（根出边则须为根本身） |
+| `SCOPE_WIDENED` | 相对父委托放宽时间窗 / 浮标集合 / 采样上限（`field` 指出首个违规字段） |
+| `BAD_SIGNATURE` | 签名与规范载荷摘要不符（内容或签名被篡改） |
+| `TARGET_UNREACHABLE` | 给定浮标与评估时刻下根到目标主体不可达（含全部路径失效） |
+| `DUPLICATE_DELEGATION` | 集合中存在规范载荷摘要相同的重复委托 |
+| `TARGET_IS_ROOT` / `SCHEMA` / `JSON_*` | 目标即根 / 模式或语法错误 |
+
+评估时刻落在时间窗外或委托 `aud` 不含目标浮标时，该委托（及其出边）**过滤为
+本次不可用**（顶点表标注 `inactive` 与原因），不作为整图拒绝；若所有到目标路径
+均被过滤则定位为 `TARGET_UNREACHABLE`。
+
+
 ## API
 
 - `GET /health` → `{"status":"ok",...}`
 - `GET /` → 值班员静态页面
-- `POST /api/verify`，请求体 `{"rootKey":"<规范JSON>","objects":["<规范JSON>",…],"now":1790000000?}`
+- `POST /api/verify`（单链逐跳核验），请求体 `{"rootKey":"<规范JSON>","objects":["<规范JSON>",…],"now":1790000000?}`
   - 成功：`200 {"ok":true,"evidence":{hops:[{signature,payloadDigest,tightened,…}],finalConstraints,verdict}}`
   - 拒绝：`422 {"ok":false,"error":{code,hop,field,message,line,col}}`
+- `POST /api/audit`（容量审计），请求体
+  `{"rootKey":"<规范JSON>","targetKey":"<规范JSON>","buoy":"buoy-01","delegations":["<容量委托规范JSON>",…],"now":1790000000?}`
+  （`delegations` 为**无序**集合，每行一份即可，服务按 `parent` 自行接图）
+  - 成功：`200 {"ok":true,"audit":{now,buoy,rootKeyThumbprint,targetThumbprint,delegationCount,vertices:[…],flowEdges:[…],minCut:{edges,capacity,sourceSideVertices},verdict:{reachable,maxTransferable,reason}}}`
+    - `flowEdges`：按 `payloadDigest`、`parentDigest` 稳定排列，每条含 `transfer / flow / residual`；
+    - `vertices`：按 `payloadDigest` 稳定排列，含全部顶点（标注 `status`、`inactiveReason`、`reachable`、`isTarget`、`inflow`、`remaining`）；
+    - `minCut`：与最大流等值的最小割证据，割边可回溯到具体委托摘要。
+  - 拒绝：`422 {"ok":false,"error":{code,node,field,message,line,col}}`，`node` 为根 / 目标 / 输入序号 / 问题委托摘要。
 
-页面行为：**错误草稿不覆盖上一份有效证据**——本次核验被拒绝时，上一份有效
-证据仍保留展示（标注「上一份有效证据」），仅当新的核验通过时才更新。
+页面行为：**容量结论与单链证据分区显示**，二者各自留存——本次核验/审计失败时，
+上一份成功证据仍保留展示（标注「上一份有效证据」），新的失败请求不会替换最近一次
+成功的容量证据；仅当新的同类请求成功时才更新对应分区。
 
 ## 一次性验收服务 `verify`
 
@@ -93,8 +146,9 @@ npm run check:page        # 页面构建检查
 2. 复核越权链拒绝（浮标越权、采样超限、集合/时间窗放宽、链首非根、非前一主体签发）；
 3. 复核篡改签名 / 改写载荷的拒绝（`BAD_SIGNATURE`）；
 4. 复核结构性与数值错误定位（重复键、键序、不安全/越界整数、非有限数等）；
-5. 运行相关代码测试（`node --test`）与页面构建检查；
-6. 启动临时网关做健康地址 API/HTTP 冒烟（`GATEWAY_URL` 存在时再冒烟对端）。
+5. 复核容量审计（无序接图、最大流值、流量守恒、摘要稳定排列、最小割证据，以及父摘要缺失 / 后继签发者不匹配 / 范围放宽 / 篡改签名 / 目标不可达的定位拒绝）；
+6. 运行相关代码测试（`node --test`）与页面构建检查；
+7. 启动临时网关做健康地址 API/HTTP 冒烟，含 `/api/audit` 成功与拒绝用例（`GATEWAY_URL` 存在时再冒烟对端）。
 
 执行完毕即退出：退出码 `0` 全部通过，`1` 存在失败项，`2` 执行异常。
 
@@ -102,11 +156,12 @@ npm run check:page        # 页面构建检查
 
 ```
 src/canonical.js   严格规范 JSON（JCS）解析/序列化、整数边界判定
-src/chain.js       委托链逐跳核验（验签、签发关系、收紧、时效、末端检查）
-src/sign.js        离线签发辅助（测试与验收复现完整链路）
-src/server.js      零依赖 HTTP 服务（静态页面 /health /api/verify）
-public/            值班员页面（证据留存、错误草稿独立展示）
-tests/             单元测试（node:test）
+src/chain.js       单链逐跳核验（验签、签发关系、收紧、时效、末端检查）
+src/audit.js       容量委托图审计（接图、逐边验签、收紧、最大流/最小割）
+src/sign.js        离线签发辅助（含容量委托 issueCapacityDelegation，供测试与验收复现）
+src/server.js      零依赖 HTTP 服务（静态页面 /health /api/verify /api/audit）
+public/            值班员页面（单链与容量分区、各自证据留存、错误草稿独立展示）
+tests/             单元测试（node:test，含 audit.test.js）
 scripts/check-page.js  页面构建检查
 verify/acceptance.js   一次性验收服务入口
 bin/verify             本机可执行验收入口

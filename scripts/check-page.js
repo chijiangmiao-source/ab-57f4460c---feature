@@ -51,8 +51,16 @@ async function main() {
   for (const token of ['fetch(', '/api/verify', 'lastValidEvidence']) {
     if (!js.includes(token)) fail(`app.js 缺少关键逻辑：${token}`);
   }
+  // 容量审计分区元素
+  for (const id of ['auditRoot', 'auditDelegations', 'auditTarget', 'auditBuoy', 'auditNow',
+    'auditBtn', 'auditPanel', 'auditErrorPanel', 'flowTable', 'vertexTable', 'minCutBody']) {
+    if (!html.includes(`id="${id}"`)) fail(`index.html 缺少容量审计元素 #${id}`);
+  }
+  for (const token of ['/api/audit', 'lastValidAudit']) {
+    if (!js.includes(token)) fail(`app.js 缺少容量审计关键逻辑：${token}`);
+  }
   if (!css.includes('.panel') || !css.includes('.error')) fail('style.css 缺少关键样式');
-  ok('页面关键元素与逻辑齐备（输入 / 错误草稿 / 证据留存）');
+  ok('页面关键元素与逻辑齐备（单链核验 / 容量审计 / 错误草稿 / 证据留存）');
 
   // JS 语法检查（浏览器脚本仅做解析校验，不执行）
   try {

@@ -17,12 +17,15 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { verifyChain } from '../src/chain.js';
+import { auditCapacity } from '../src/audit.js';
 import { canonicalize, parseCanonical } from '../src/canonical.js';
 import {
   generateKeyPair,
   issueDelegation,
   issueCommand,
+  issueCapacityDelegation,
   rootKeyDocument,
+  rootThumbprint,
   buildValidChain,
 } from '../src/sign.js';
 
@@ -66,7 +69,7 @@ function resign(value, privateJwk) {
 
 // ---------- 1) 合法链逐跳证据 ----------
 function sectionValidChain() {
-  console.log('\n[1/6] 合法链逐跳证据复核');
+  console.log('\n[1/7] 合法链逐跳证据复核');
   const root = generateKeyPair();
   const a = generateKeyPair();
   const b = generateKeyPair();
@@ -119,7 +122,7 @@ function sectionValidChain() {
 
 // ---------- 2) 越权链 ----------
 function sectionOverPrivileged() {
-  console.log('\n[2/6] 越权链拒绝复核');
+  console.log('\n[2/7] 越权链拒绝复核');
 
   // 2a. 末端浮标未获上游允许（第 0 跳允许 buoy-01/02，末端命令仅允许 buoy-01，
   //     命令请求 buoy-02 → 首个限制跳为末端 hop=1）
@@ -191,7 +194,7 @@ function sectionOverPrivileged() {
 
 // ---------- 3) 篡改签名 / 改写载荷 ----------
 function sectionTamper() {
-  console.log('\n[3/6] 篡改签名与改写载荷拒绝复核');
+  console.log('\n[3/7] 篡改签名与改写载荷拒绝复核');
 
   let c = buildValidChain({ now: NOW });
   let v = parseCanonical(c.objectTexts[0], { requireOrderedKeys: false }).value;
@@ -216,7 +219,7 @@ function sectionTamper() {
 
 // ---------- 4) 结构性 / 数值错误 ----------
 function sectionStructural() {
-  console.log('\n[4/6] 结构性与数值错误定位复核');
+  console.log('\n[4/7] 结构性与数值错误定位复核');
   const cases = [
     { name: '重复键', code: 'DUPLICATE_KEY',
       mutate: (t) => t.replace('"maxSamples":100', '"maxSamples":100,"maxSamples":9') },
@@ -244,7 +247,181 @@ function sectionStructural() {
   }
 }
 
-// ---------- 5) 代码测试 / 页面检查 ----------
+// ---------- 5) 容量审计：图核验、最大可转移容量、最小割证据与拒绝定位 ----------
+
+function resignCap(value, privateJwk) {
+  const { sig: _s, ...payload } = value;
+  const key = crypto.createPrivateKey({ key: privateJwk, format: 'jwk' });
+  const sigBuf = crypto.sign('sha256', Buffer.from(canonicalize(payload), 'utf8'),
+    { key, dsaEncoding: 'ieee-p1363' });
+  const sig = sigBuf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return canonicalize({ ...payload, sig });
+}
+
+// 菱形汇聚图：root -60-> a -50-> t；root -40-> b -40-> t
+function buildDiamond() {
+  const root = generateKeyPair();
+  const a = generateKeyPair();
+  const b = generateKeyPair();
+  const t = generateKeyPair();
+  const rp = rootThumbprint(root.publicJwk);
+  const d1 = issueCapacityDelegation({
+    iss: root.publicJwk, sub: a.publicJwk,
+    nbf: NOW - 3600, exp: NOW + 3600, aud: ['buoy-01'],
+    maxSamples: 100, transfer: 60, parent: rp,
+  }, root.privateJwk);
+  const d2 = issueCapacityDelegation({
+    iss: root.publicJwk, sub: b.publicJwk,
+    nbf: NOW - 3600, exp: NOW + 3600, aud: ['buoy-01'],
+    maxSamples: 100, transfer: 40, parent: rp,
+  }, root.privateJwk);
+  const d3 = issueCapacityDelegation({
+    iss: a.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+    maxSamples: 50, transfer: 50, parent: d1,
+  }, a.privateJwk);
+  const d4 = issueCapacityDelegation({
+    iss: b.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+    maxSamples: 40, transfer: 40, parent: d2,
+  }, b.privateJwk);
+  return {
+    root, a, b, t, rp, d1, d2, d3, d4,
+    input: {
+      rootKeyText: rootKeyDocument(root.publicJwk),
+      delegationTexts: [d4, d2, d3, d1], // 无序
+      targetKeyText: rootKeyDocument(t.publicJwk),
+      buoy: 'buoy-01', now: NOW,
+    },
+  };
+}
+
+function expectAuditReject(name, input, code, field = null) {
+  const r = auditCapacity(input);
+  const good = !r.ok && r.error.code === code && (field === null || r.error.field === field);
+  check(`${name}（code=${code}${field ? `, field=${field}` : ''}）`,
+    good, good ? '' : `实际=${JSON.stringify(r.ok ? r.audit.verdict : r.error)}`);
+}
+
+function sectionCapacityAudit() {
+  console.log('\n[5/7] 容量审计复核（无序委托图 / 最大可转移容量 / 最小割）');
+
+  const g = buildDiamond();
+  const r = auditCapacity(g.input);
+  check('菱形汇聚图容量审计通过', r.ok, !r.ok ? JSON.stringify(r.error) : '');
+  if (!r.ok) return;
+  const a = r.audit;
+
+  check('最大可转移容量 = 两路径之和 90', a.verdict.maxTransferable === 90,
+    `实际 ${a.verdict.maxTransferable}`);
+  check('最小割容量 = 90 且与最大流相等',
+    a.minCut.capacity === 90 && a.minCut.capacity === a.verdict.maxTransferable);
+  check('最小割由 2 条入目标收口边构成', a.minCut.edges.length === 2);
+  check('入图委托计数 = 4', a.delegationCount === 4);
+
+  // 流量边稳定排列（按规范载荷摘要）
+  const edgeDigests = a.flowEdges.map((e) => e.payloadDigest);
+  check('流量边按规范载荷摘要稳定排列',
+    JSON.stringify(edgeDigests) === JSON.stringify([...edgeDigests].sort()));
+
+  // 每条边流量守恒：flow + residual = transfer，且 0<=flow<=transfer
+  let flowConserved = true;
+  for (const e of a.flowEdges) {
+    if (!(e.flow >= 0 && e.flow <= e.transfer && e.flow + e.residual === e.transfer)) {
+      flowConserved = false;
+    }
+  }
+  check('每条流量边 0<=实流<=transfer 且 实流+余量=transfer', flowConserved);
+
+  // 独立复算每条流量边的规范载荷摘要
+  let digestOk = true;
+  for (const text of g.input.delegationTexts) {
+    const parsed = parseCanonical(text);
+    const { sig: _s, ...payload } = parsed.value;
+    const want = crypto.createHash('sha256').update(canonicalize(payload), 'utf8').digest('hex');
+    if (!a.flowEdges.some((e) => e.payloadDigest === want)) digestOk = false;
+  }
+  check('每条流量边摘要可由规范字节独立复算', digestOk);
+
+  // 顶点表含全部 4 个委托，按摘要排列，目标顶点标注正确
+  check('顶点表覆盖全部委托且按摘要排列',
+    a.vertices.length === 4 &&
+    JSON.stringify(a.vertices.map((v) => v.payloadDigest))
+      === JSON.stringify([...a.vertices.map((v) => v.payloadDigest)].sort()));
+  const targets = a.vertices.filter((v) => v.isTarget);
+  check('目标主体恰对应 2 个委托顶点（d3/d4 的 sub=t）', targets.length === 2);
+  check('目标顶点剩余容量为 0（额度已被最大流用尽）',
+    targets.every((v) => v.remaining === 0));
+
+  // 割边引用的摘要全部存在于流量边集合
+  const cutRefOk = a.minCut.edges.every((c) => edgeDigests.includes(c.payloadDigest));
+  check('最小割割边均可回溯到具体委托摘要', cutRefOk);
+
+  // ---- 拒绝路径 ----
+  // 父摘要缺失（重签保持签名有效）
+  {
+    const v = parseCanonical(g.d3, { requireOrderedKeys: false }).value;
+    v.parent = 'a'.repeat(64);
+    const bad = resignCap(v, g.a.privateJwk);
+    expectAuditReject('父摘要缺失 → PARENT_NOT_FOUND',
+      { ...g.input, delegationTexts: [g.d4, g.d2, bad, g.d1] }, 'PARENT_NOT_FOUND', '$["parent"]');
+  }
+  // 后继签发者不匹配
+  {
+    const mallory = generateKeyPair();
+    const bad = issueCapacityDelegation({
+      iss: mallory.publicJwk, sub: g.t.publicJwk,
+      nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+      maxSamples: 50, transfer: 50, parent: g.d1,
+    }, mallory.privateJwk);
+    expectAuditReject('后继签发者不匹配 → SUCCESSOR_ISSUER_MISMATCH',
+      { ...g.input, delegationTexts: [g.d4, g.d2, bad, g.d1] }, 'SUCCESSOR_ISSUER_MISMATCH');
+  }
+  // 范围放宽（aud 新增浮标）
+  {
+    const bad = issueCapacityDelegation({
+      iss: g.a.publicJwk, sub: g.t.publicJwk,
+      nbf: NOW - 1800, exp: NOW + 1800,
+      aud: ['buoy-01', 'buoy-09'], maxSamples: 50, transfer: 50, parent: g.d1,
+    }, g.a.privateJwk);
+    expectAuditReject('浮标范围放宽 → SCOPE_WIDENED',
+      { ...g.input, delegationTexts: [g.d4, g.d2, bad, g.d1] }, 'SCOPE_WIDENED', '$["aud"]');
+  }
+  // 篡改签名载荷
+  {
+    const v = parseCanonical(g.d1, { requireOrderedKeys: false }).value;
+    v.maxSamples = 101;
+    const bad = canonicalize(v);
+    expectAuditReject('改写已签名载荷 → BAD_SIGNATURE',
+      { ...g.input, delegationTexts: [g.d4, g.d2, g.d3, bad] }, 'BAD_SIGNATURE');
+  }
+  // 目标不可达：浮标不允许
+  expectAuditReject('目标浮标不被允许 → TARGET_UNREACHABLE',
+    { ...g.input, buoy: 'buoy-zz' }, 'TARGET_UNREACHABLE');
+  // 目标不可达：全部路径在评估时刻已过期
+  expectAuditReject('评估时刻所有路径失效 → TARGET_UNREACHABLE',
+    { ...g.input, now: NOW + 99999 }, 'TARGET_UNREACHABLE');
+  // 目标主体与图无关
+  {
+    const stranger = generateKeyPair();
+    expectAuditReject('目标主体无关 → TARGET_UNREACHABLE',
+      { ...g.input, targetKeyText: rootKeyDocument(stranger.publicJwk) }, 'TARGET_UNREACHABLE');
+  }
+  // 失效路径被过滤但仍可达：d3 改签到已过期的窄窗，a 路径失效，仅剩 40
+  {
+    const expired = issueCapacityDelegation({
+      iss: g.a.publicJwk, sub: g.t.publicJwk,
+      nbf: NOW - 3000, exp: NOW - 500, aud: ['buoy-01'],
+      maxSamples: 50, transfer: 50, parent: g.d1,
+    }, g.a.privateJwk);
+    const rr = auditCapacity({ ...g.input, delegationTexts: [g.d4, g.d2, expired, g.d1] });
+    check('一条路径过期被过滤：剩余路径容量 40',
+      rr.ok && rr.audit.verdict.maxTransferable === 40,
+      rr.ok ? `实际 ${rr.audit.verdict.maxTransferable}` : JSON.stringify(rr.error));
+  }
+}
+
+// ---------- 6) 代码测试 / 页面检查 ----------
 function run(cmd, args, timeoutMs = 120000) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: rootDir, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -264,7 +441,7 @@ function run(cmd, args, timeoutMs = 120000) {
 }
 
 async function sectionTestsAndPage() {
-  console.log('\n[5/6] 代码测试与页面构建检查');
+  console.log('\n[6/7] 代码测试与页面构建检查');
   const t = await run(process.execPath, ['--test', '--test-concurrency=2', 'tests/']);
   const testCount = (t.out.match(/# tests (\d+)/) || [])[1];
   const passCount = (t.out.match(/# pass (\d+)/) || [])[1];
@@ -307,7 +484,7 @@ async function waitForHealth(port, tries = 60) {
 }
 
 async function smokeGateway(label, target) {
-  console.log(`\n[6/6] 健康地址 API/HTTP 冒烟（${label}）`);
+  console.log(`\n[7/7] 健康地址 API/HTTP 冒烟（${label}）`);
 
   const health = await httpRequest('GET', '/health', target);
   const healthJson = JSON.parse(health.body);
@@ -367,6 +544,67 @@ async function smokeGateway(label, target) {
 
   const badReq = await httpRequest('POST', '/api/verify', { ...target, body: 'not-json' });
   check('POST /api/verify 非法请求体 → 400 BAD_REQUEST', badReq.status === 400);
+
+  // ---- /api/audit 容量审计冒烟 ----
+  const dag = buildDiamond();
+  const auditOk = await httpRequest('POST', '/api/audit', {
+    ...target,
+    body: JSON.stringify({
+      rootKey: dag.input.rootKeyText,
+      targetKey: dag.input.targetKeyText,
+      buoy: dag.input.buoy,
+      delegations: dag.input.delegationTexts,
+      now: dag.input.now,
+    }),
+  });
+  const auditOkJson = JSON.parse(auditOk.body);
+  check('POST /api/audit 合法图 → 200，最大可转移容量=90、流量边/顶点/最小割齐备',
+    auditOk.status === 200 && auditOkJson.ok === true
+    && auditOkJson.audit.verdict.maxTransferable === 90
+    && Array.isArray(auditOkJson.audit.flowEdges) && auditOkJson.audit.flowEdges.length === 4
+    && Array.isArray(auditOkJson.audit.vertices) && auditOkJson.audit.vertices.length === 4
+    && Array.isArray(auditOkJson.audit.minCut.edges) && auditOkJson.audit.minCut.capacity === 90,
+    `status=${auditOk.status} ${auditOk.body.slice(0, 200)}`);
+
+  // 失败请求：目标不可达（错误浮标），须 422 且证据由页面自行留存（服务无状态）
+  const auditBad = await httpRequest('POST', '/api/audit', {
+    ...target,
+    body: JSON.stringify({
+      rootKey: dag.input.rootKeyText,
+      targetKey: dag.input.targetKeyText,
+      buoy: 'buoy-zz',
+      delegations: dag.input.delegationTexts,
+      now: dag.input.now,
+    }),
+  });
+  const auditBadJson = JSON.parse(auditBad.body);
+  check('POST /api/audit 目标不可达 → 422 TARGET_UNREACHABLE',
+    auditBad.status === 422 && auditBadJson.ok === false
+    && auditBadJson.error.code === 'TARGET_UNREACHABLE',
+    `status=${auditBad.status}`);
+
+  // 结构拒绝：集合中混入一份缺 parent 的普通 delegation（无 parent 字段）
+  const plain = issueDelegation({
+    iss: dag.root.publicJwk, sub: dag.a.publicJwk,
+    nbf: NOW - 3600, exp: NOW + 3600, aud: ['buoy-01'], maxSamples: 10,
+  }, dag.root.privateJwk);
+  const auditSch = await httpRequest('POST', '/api/audit', {
+    ...target,
+    body: JSON.stringify({
+      rootKey: dag.input.rootKeyText,
+      targetKey: dag.input.targetKeyText,
+      buoy: 'buoy-01',
+      delegations: [...dag.input.delegationTexts, plain],
+      now: NOW,
+    }),
+  });
+  const auditSchJson = JSON.parse(auditSch.body);
+  check('POST /api/audit 混入缺 parent 的普通委托 → 422 SCHEMA',
+    auditSch.status === 422 && auditSchJson.ok === false && auditSchJson.error.code === 'SCHEMA',
+    `status=${auditSch.status}`);
+
+  const auditBadReq = await httpRequest('POST', '/api/audit', { ...target, body: 'not-json' });
+  check('POST /api/audit 非法请求体 → 400 BAD_REQUEST', auditBadReq.status === 400);
 }
 
 async function main() {
@@ -375,6 +613,7 @@ async function main() {
   sectionOverPrivileged();
   sectionTamper();
   sectionStructural();
+  sectionCapacityAudit();
   await sectionTestsAndPage();
 
   const port = Number(process.env.VERIFY_PORT || 18080);

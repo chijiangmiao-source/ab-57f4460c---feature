@@ -4,8 +4,8 @@
 // 生产场景中这些步骤在离线环境完成；此处供测试与 verify 验收服务复现完整链路。
 
 import crypto from 'node:crypto';
-import { canonicalize } from './canonical.js';
-import { b64urlEncode } from './chain.js';
+import { canonicalize, parseCanonical } from './canonical.js';
+import { b64urlEncode, sha256Hex, jwkThumbprint } from './chain.js';
 
 export function generateKeyPair() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -59,6 +59,45 @@ export function issueCommand({ iss, sub, nbf, exp, aud, maxSamples, buoy, sample
   };
   const sig = signPayload(payload, privateJwk);
   return canonicalize({ ...payload, sig });
+}
+
+// 容量委托：在普通委托字段之外声明 parent（父载荷摘要，根出边传根公钥指纹）
+// 与 transfer（本边可转移容量，<= maxSamples）。
+// 入参 parentDigest 可直接给十六进制摘要；给父委托的【规范 JSON 文本】时
+// 自动计算其“去掉 sig 后规范字节”的 SHA-256。
+export function delegationDigest(textOrValue) {
+  const value = typeof textOrValue === 'string'
+    ? parseCanonical(textOrValue, { requireOrderedKeys: true }).value
+    : textOrValue;
+  const { sig: _sig, ...payload } = value;
+  return sha256Hex(Buffer.from(canonicalize(payload), 'utf8'));
+}
+
+export function issueCapacityDelegation(
+  { iss, sub, nbf, exp, aud, maxSamples, transfer, parent },
+  privateJwk,
+) {
+  const parentDigest = typeof parent === 'string' && /^[0-9a-f]{64}$/.test(parent)
+    ? parent
+    : delegationDigest(parent);
+  const payload = {
+    aud: [...aud],
+    exp,
+    iss: { crv: iss.crv, kty: iss.kty, x: iss.x, y: iss.y },
+    maxSamples,
+    nbf,
+    parent: parentDigest,
+    sub: { crv: sub.crv, kty: sub.kty, x: sub.x, y: sub.y },
+    transfer,
+    typ: 'delegation',
+  };
+  const sig = signPayload(payload, privateJwk);
+  return canonicalize({ ...payload, sig });
+}
+
+// 根公钥指纹（根出边委托的 parent，与 jwkThumbprint 同一规范字节）
+export function rootThumbprint(publicJwk) {
+  return jwkThumbprint(publicJwk);
 }
 
 // 便捷：生成一条 root -> 中间人 -> 命令 的合法链

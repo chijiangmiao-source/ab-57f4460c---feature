@@ -3,24 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>浮标应急采样 · 受限委托链核验</title>
+<title>浮标应急采样 · 委托链核验与容量审计</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
-  <h1>海洋观测浮标失联应急采样 · 受限委托链核验</h1>
-  <p class="sub">岸站离线签发链逐跳验签：粘贴根公钥与按顺序排列的委托 / 末端命令（每行一份规范 JSON 对象）</p>
+  <h1>海洋观测浮标失联应急采样 · 受限委托链核验 / 容量审计</h1>
+  <p class="sub">岸站离线签发委托：逐跳核验一条有序链，或粘贴无序容量委托集合做根→目标主体的最大可转移容量审计（均以同一套规范 JSON 字节 P-256 验签）</p>
 </header>
 
 <main>
+  <!-- ============ 一、单链逐跳核验（原有行为保持不变） ============ -->
   <section class="panel">
-    <h2>输入</h2>
+    <h2>一、单链逐跳核验（有序委托链 → 末端命令）</h2>
     <label for="rootKey">根公钥（P-256 JWK，规范 JSON）</label>
     <textarea id="rootKey" rows="2" spellcheck="false"
       placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
 
     <label for="objects">委托链对象（按顺序，每行一份：委托…→ 末端命令）</label>
-    <textarea id="objects" rows="10" spellcheck="false"
+    <textarea id="objects" rows="8" spellcheck="false"
       placeholder='{"aud":[…],"exp":…,"iss":{…},"maxSamples":…,"nbf":…,"sig":"…","sub":{…},"typ":"delegation"}'></textarea>
 
     <label for="now">评估时刻（unix 秒，留空取服务器当前时间）</label>
@@ -28,17 +29,17 @@
 
     <div class="actions">
       <button id="verifyBtn" type="button">逐跳核验</button>
-      <button id="clearBtn" type="button" class="ghost">清空</button>
+      <button id="clearBtn" type="button" class="ghost">清空单链</button>
     </div>
   </section>
 
   <section class="panel" id="errorPanel" hidden>
-    <h2>拒绝原因（错误草稿，不覆盖有效证据）</h2>
+    <h2>单链拒绝原因（错误草稿，不覆盖有效证据）</h2>
     <div id="errorBody" class="error"></div>
   </section>
 
   <section class="panel" id="evidencePanel" hidden>
-    <h2>逐跳证据与最终结论</h2>
+    <h2>单链逐跳证据与最终结论</h2>
     <div id="verdict"></div>
     <table id="hopTable">
       <thead>
@@ -51,10 +52,80 @@
     </table>
     <div id="finalConstraints"></div>
   </section>
+
+  <hr class="divider">
+
+  <!-- ============ 二、容量审计（无序委托图） ============ -->
+  <section class="panel">
+    <h2>二、容量审计（无序容量委托集合 · 根 → 目标主体最大可转移容量）</h2>
+    <label for="auditRoot">根公钥（P-256 JWK，规范 JSON）</label>
+    <textarea id="auditRoot" rows="2" spellcheck="false"
+      placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
+
+    <label for="auditDelegations">容量委托集合（无序，每行一份规范 JSON；含 parent 父载荷摘要与 transfer 可转移容量）</label>
+    <textarea id="auditDelegations" rows="10" spellcheck="false"
+      placeholder='{"aud":[…],"exp":…,"iss":{…},"maxSamples":…,"nbf":…,"parent":"<父载荷摘要或根指纹>","sig":"…","sub":{…},"transfer":…,"typ":"delegation"}'></textarea>
+
+    <div class="grid2">
+      <div>
+        <label for="auditTarget">目标主体公钥（P-256 JWK，规范 JSON）</label>
+        <textarea id="auditTarget" rows="3" spellcheck="false"
+          placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
+      </div>
+      <div>
+        <label for="auditBuoy">目标浮标</label>
+        <input id="auditBuoy" type="text" placeholder="例如 buoy-01">
+        <label for="auditNow">评估时刻（unix 秒，留空取服务器当前时间）</label>
+        <input id="auditNow" type="text" inputmode="numeric" placeholder="例如 1790000000">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="auditBtn" type="button">发起容量审计</button>
+      <button id="auditClearBtn" type="button" class="ghost">清空审计</button>
+    </div>
+  </section>
+
+  <section class="panel" id="auditErrorPanel" hidden>
+    <h2>容量审计拒绝原因（错误草稿，不覆盖上一份容量证据）</h2>
+    <div id="auditErrorBody" class="error"></div>
+  </section>
+
+  <section class="panel" id="auditPanel" hidden>
+    <h2>容量结论与图证据</h2>
+    <div id="auditVerdict"></div>
+
+    <h3 class="subhead">流量边（按规范载荷摘要稳定排列）</h3>
+    <table id="flowTable">
+      <thead>
+        <tr>
+          <th>类型</th><th>父载荷摘要</th><th>本载荷摘要</th>
+          <th>签发者指纹</th><th>主体指纹</th>
+          <th>声明可转移</th><th>实流</th><th>边余量</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3 class="subhead">顶点剩余容量（按摘要排列，含失效/不可达顶点）</h3>
+    <table id="vertexTable">
+      <thead>
+        <tr>
+          <th>载荷摘要</th><th>主体指纹</th><th>状态</th>
+          <th>时间窗 [nbf, exp]</th><th>允许浮标</th>
+          <th>采样上限</th><th>声明转移</th><th>过流额度</th><th>剩余容量</th><th>可达</th><th>目标</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3 class="subhead">最小割证据（能阻断更多采样的最小边集）</h3>
+    <div id="minCutBody"></div>
+  </section>
 </main>
 
 <footer>
-  <p>规范：JCS (RFC 8785) 规范 JSON 字节 · ECDSA P-256/SHA-256（P1363）· 仅允许时间窗 / 浮标集合 / 采样上限收紧</p>
+  <p>规范：JCS (RFC 8785) 规范 JSON 字节 · ECDSA P-256/SHA-256（P1363）· 仅允许时间窗 / 浮标集合 / 采样上限收紧 · 容量证据与单链证据分区留存</p>
 </footer>
 
 <script src="/app.js"></script>
