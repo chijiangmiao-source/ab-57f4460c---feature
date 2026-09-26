@@ -3,18 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>浮标应急采样 · 受限委托链核验</title>
+<title>浮标应急采样 · 委托链核验与容量审计</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
-  <h1>海洋观测浮标失联应急采样 · 受限委托链核验</h1>
-  <p class="sub">岸站离线签发链逐跳验签：粘贴根公钥与按顺序排列的委托 / 末端命令（每行一份规范 JSON 对象）</p>
+  <h1>海洋观测浮标失联应急采样 · 受限委托链核验与容量审计</h1>
+  <p class="sub">岸站离线签发核验：① 按顺序逐跳核验单条委托链；② 粘贴无序容量委托集合，审计失联期间目标主体最多可用采样额度</p>
 </header>
 
 <main>
+  <h2 class="section-title">① 单链顺序核验</h2>
+
   <section class="panel">
-    <h2>输入</h2>
+    <h3>输入</h3>
     <label for="rootKey">根公钥（P-256 JWK，规范 JSON）</label>
     <textarea id="rootKey" rows="2" spellcheck="false"
       placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
@@ -33,12 +35,12 @@
   </section>
 
   <section class="panel" id="errorPanel" hidden>
-    <h2>拒绝原因（错误草稿，不覆盖有效证据）</h2>
+    <h3>拒绝原因（错误草稿，不覆盖有效证据）</h3>
     <div id="errorBody" class="error"></div>
   </section>
 
   <section class="panel" id="evidencePanel" hidden>
-    <h2>逐跳证据与最终结论</h2>
+    <h3>逐跳证据与最终结论（单链）</h3>
     <div id="verdict"></div>
     <table id="hopTable">
       <thead>
@@ -51,10 +53,80 @@
     </table>
     <div id="finalConstraints"></div>
   </section>
+
+  <h2 class="section-title">② 容量委托图审计（无序集合 · 最大可转移容量）</h2>
+
+  <section class="panel">
+    <h3>输入</h3>
+    <label for="capRootKey">根公钥（P-256 JWK，规范 JSON）</label>
+    <textarea id="capRootKey" rows="2" spellcheck="false"
+      placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
+
+    <label for="capDelegations">容量委托集合（无需排序，每行一份规范 JSON；含 parent 父摘要与 transfer 可转移容量）</label>
+    <textarea id="capDelegations" rows="10" spellcheck="false"
+      placeholder='{"aud":[…],"exp":…,"iss":{…},"maxSamples":…,"nbf":…,"parent":"…","sig":"…","sub":{…},"transfer":…,"typ":"cap-delegation"}'></textarea>
+
+    <div class="grid2">
+      <div>
+        <label for="capTarget">目标主体公钥（P-256 JWK，规范 JSON）</label>
+        <textarea id="capTarget" rows="3" spellcheck="false"
+          placeholder='{"crv":"P-256","kty":"EC","x":"…","y":"…"}'></textarea>
+      </div>
+      <div>
+        <label for="capBuoy">目标浮标</label>
+        <input id="capBuoy" type="text" placeholder="例如 buoy-01">
+        <label for="capNow">评估时刻（unix 秒，留空取服务器当前时间）</label>
+        <input id="capNow" type="text" inputmode="numeric" placeholder="例如 1790000000">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="capBtn" type="button">发起容量审计</button>
+      <button id="capClearBtn" type="button" class="ghost">清空</button>
+    </div>
+  </section>
+
+  <section class="panel" id="capErrorPanel" hidden>
+    <h3>容量审计拒绝原因（错误草稿，不覆盖上一份容量证据）</h3>
+    <div id="capErrorBody" class="error"></div>
+  </section>
+
+  <section class="panel" id="capEvidencePanel" hidden>
+    <h3>容量结论（与单链证据分区，独立留存）</h3>
+    <div id="capVerdict"></div>
+
+    <h4 class="subhead">流量边（按规范载荷摘要排列）</h4>
+    <table id="capFlowTable">
+      <thead>
+        <tr>
+          <th>规范载荷摘要（边 ID）</th><th>签发者 → 主体（指纹前缀）</th>
+          <th>可转移容量</th><th>流量</th><th>剩余容量</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h4 class="subhead">最小割证据（割去以下委托边即可阻断更多采样）</h4>
+    <div id="capCut"></div>
+
+    <details>
+      <summary>全部委托边（含在该浮标 / 时刻未生效的边）</summary>
+      <table id="capAllTable">
+        <thead>
+          <tr>
+            <th>载荷摘要</th><th>粘贴序号</th><th>签发者 → 主体</th>
+            <th>父摘要</th><th>transfer / maxSamples</th>
+            <th>时间窗</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </details>
+  </section>
 </main>
 
 <footer>
-  <p>规范：JCS (RFC 8785) 规范 JSON 字节 · ECDSA P-256/SHA-256（P1363）· 仅允许时间窗 / 浮标集合 / 采样上限收紧</p>
+  <p>规范：JCS (RFC 8785) 规范 JSON 字节 · ECDSA P-256/SHA-256（P1363）· 仅允许时间窗 / 浮标集合 / 采样上限收紧 · 容量按父摘要接图求最大流 / 最小割</p>
 </footer>
 
 <script src="/app.js"></script>

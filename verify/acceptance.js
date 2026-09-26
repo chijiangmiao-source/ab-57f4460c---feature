@@ -6,8 +6,9 @@
 //   2. 复核越权链的拒绝（浮标未获上游允许 / 采样量超限 / 约束放宽），定位跳与字段；
 //   3. 复核篡改签名 / 改写载荷的拒绝（BAD_SIGNATURE）；
 //   4. 复核结构性错误（重复键、键序不规范、不安全 / 越界整数、非有限数、链首非根公钥）；
-//   5. 运行相关代码测试（node --test tests/）与页面构建检查；
-//   6. 启动本机服务做健康地址 API/HTTP 冒烟；GATEWAY_URL 存在时再冒烟对端。
+//   5. 复核容量委托图审计（乱序接线、逐边验签、只收紧、最大流 / 最小割、各类拒绝定位）；
+//   6. 运行相关代码测试（node --test tests/）与页面构建检查；
+//   7. 启动本机服务做健康地址 API/HTTP 冒烟（含 /api/capacity）；GATEWAY_URL 存在时再冒烟对端。
 //
 // 执行完毕即退出：0 全部通过，1 存在验收失败，2 执行异常。
 
@@ -17,11 +18,13 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { verifyChain } from '../src/chain.js';
+import { auditCapacity, findCycle, maxFlow } from '../src/capacity.js';
 import { canonicalize, parseCanonical } from '../src/canonical.js';
 import {
   generateKeyPair,
   issueDelegation,
   issueCommand,
+  issueCapDelegation,
   rootKeyDocument,
   buildValidChain,
 } from '../src/sign.js';
@@ -66,7 +69,7 @@ function resign(value, privateJwk) {
 
 // ---------- 1) 合法链逐跳证据 ----------
 function sectionValidChain() {
-  console.log('\n[1/6] 合法链逐跳证据复核');
+  console.log('\n[1/7] 合法链逐跳证据复核');
   const root = generateKeyPair();
   const a = generateKeyPair();
   const b = generateKeyPair();
@@ -119,7 +122,7 @@ function sectionValidChain() {
 
 // ---------- 2) 越权链 ----------
 function sectionOverPrivileged() {
-  console.log('\n[2/6] 越权链拒绝复核');
+  console.log('\n[2/7] 越权链拒绝复核');
 
   // 2a. 末端浮标未获上游允许（第 0 跳允许 buoy-01/02，末端命令仅允许 buoy-01，
   //     命令请求 buoy-02 → 首个限制跳为末端 hop=1）
@@ -191,7 +194,7 @@ function sectionOverPrivileged() {
 
 // ---------- 3) 篡改签名 / 改写载荷 ----------
 function sectionTamper() {
-  console.log('\n[3/6] 篡改签名与改写载荷拒绝复核');
+  console.log('\n[3/7] 篡改签名与改写载荷拒绝复核');
 
   let c = buildValidChain({ now: NOW });
   let v = parseCanonical(c.objectTexts[0], { requireOrderedKeys: false }).value;
@@ -216,7 +219,7 @@ function sectionTamper() {
 
 // ---------- 4) 结构性 / 数值错误 ----------
 function sectionStructural() {
-  console.log('\n[4/6] 结构性与数值错误定位复核');
+  console.log('\n[4/7] 结构性与数值错误定位复核');
   const cases = [
     { name: '重复键', code: 'DUPLICATE_KEY',
       mutate: (t) => t.replace('"maxSamples":100', '"maxSamples":100,"maxSamples":9') },
@@ -244,7 +247,165 @@ function sectionStructural() {
   }
 }
 
-// ---------- 5) 代码测试 / 页面检查 ----------
+// ---------- 5) 容量委托图审计 ----------
+async function sectionCapacity() {
+  console.log('\n[5/7] 容量委托图审计复核');
+
+  const root = generateKeyPair();
+  const a = generateKeyPair();
+  const b = generateKeyPair();
+  const t = generateKeyPair();
+  const mk = (over, priv) => issueCapDelegation(over, priv);
+
+  // 菱形图：root-e0(70)->a-e2(50)->t；root-e1(40)->b-e3(30)->t；最大流 80
+  const e0 = await mk({
+    iss: root.publicJwk, sub: a.publicJwk,
+    nbf: NOW - 3600, exp: NOW + 3600, aud: ['buoy-01', 'buoy-02'],
+    maxSamples: 100, transfer: 70, parent: '',
+  }, root.privateJwk);
+  const e1 = await mk({
+    iss: root.publicJwk, sub: b.publicJwk,
+    nbf: NOW - 3600, exp: NOW + 3600, aud: ['buoy-01'],
+    maxSamples: 60, transfer: 40, parent: '',
+  }, root.privateJwk);
+  const e2 = await mk({
+    iss: a.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+    maxSamples: 80, transfer: 50, parent: e0.digest,
+  }, a.privateJwk);
+  const e3 = await mk({
+    iss: b.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+    maxSamples: 50, transfer: 30, parent: e1.digest,
+  }, b.privateJwk);
+
+  const base = {
+    rootKeyText: rootKeyDocument(root.publicJwk),
+    targetText: rootKeyDocument(t.publicJwk),
+    buoy: 'buoy-01', now: NOW,
+  };
+  // 故意乱序粘贴
+  const r = auditCapacity({ ...base, delegationTexts: [e3.text, e1.text, e2.text, e0.text] });
+  check('菱形乱序集合容量审计通过', r.ok, !r.ok ? JSON.stringify(r.error) : '');
+  if (r.ok) {
+    const ev = r.evidence;
+    check('最大可转移容量 = 80（min(70+40, 50+30)）', ev.maxTransferable === 80,
+      `实际=${ev.maxTransferable}`);
+    check('最小割容量 = 最大流 = 80',
+      ev.minCut.capacity === 80 && ev.minCut.capacity === ev.maxTransferable);
+    check('最小割为汇入目标的 e2+e3（50+30）',
+      ev.minCut.edges.map((x) => x.payloadDigest).sort().join(',') ===
+      [e2.digest, e3.digest].sort().join(','));
+    check('全部流量边 flow+remaining=capacity 且按摘要排列',
+      ev.flowEdges.every((x) => x.flow + x.remaining === x.capacity) &&
+      ev.edges.map((x) => x.payloadDigest).join(',') ===
+      ev.edges.map((x) => x.payloadDigest).sort().join(','));
+    check('每条边携带签名与父摘要，根边 parent 为空串',
+      ev.edges.every((x) => /^[A-Za-z0-9_-]{86}$/.test(x.signature)) &&
+      ev.edges.find((x) => x.payloadDigest === e0.digest).parentDigest === '');
+  }
+
+  // 独立复算每条边的规范载荷摘要
+  let digestOk = true;
+  for (const [edge] of [[e0], [e1], [e2], [e3]]) {
+    const v = parseCanonical(edge.text).value;
+    const { sig: _s, ...payload } = v;
+    if (sha256Hex(Buffer.from(canonicalize(payload), 'utf8')) !== edge.digest) digestOk = false;
+  }
+  check('每条容量委托的 parent 摘要可由规范字节独立复算', digestOk);
+
+  // 确定性：换粘贴顺序结论一致
+  const r2 = auditCapacity({ ...base, delegationTexts: [e0.text, e1.text, e2.text, e3.text] });
+  check('容量结论与最小割对粘贴顺序不敏感',
+    r2.ok && r2.evidence.maxTransferable === 80 &&
+    JSON.stringify(r2.evidence.minCut.edges.map((x) => x.payloadDigest).sort()) ===
+    JSON.stringify(r.ok ? r.evidence.minCut.edges.map((x) => x.payloadDigest).sort() : []));
+
+  // 失败定位
+  const expectCapReject = (name, input, code, index = null, field = null) => {
+    const rr = auditCapacity(input);
+    const good = !rr.ok && rr.error.code === code
+      && (index === null || rr.error.index === index)
+      && (field === null || rr.error.field === field);
+    check(`${name}（code=${code}${index === null ? '' : `, index=${index}`}${field ? `, field=${field}` : ''}）`,
+      good, good ? '' : `实际=${JSON.stringify(rr.ok ? rr.evidence.verdict : rr.error)}`);
+  };
+
+  expectCapReject('父摘要缺失（删除 e0 后 e2 悬空）',
+    { ...base, delegationTexts: [e3.text, e1.text, e2.text] }, 'PARENT_NOT_FOUND');
+
+  const noParent = canonicalize((() => {
+    const v = parseCanonical(e0.text, { requireOrderedKeys: false }).value;
+    delete v.parent;
+    return v;
+  })());
+  expectCapReject('缺少 parent 成员',
+    { ...base, delegationTexts: [noParent, e1.text, e2.text, e3.text] }, 'PARENT_MISSING');
+
+  const mallory = generateKeyPair();
+  const badIss = await mk({
+    iss: mallory.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01'],
+    maxSamples: 80, transfer: 50, parent: e0.digest,
+  }, mallory.privateJwk);
+  expectCapReject('后继签发者不匹配',
+    { ...base, delegationTexts: [e3.text, e1.text, badIss.text, e0.text] },
+    'ISSUER_MISMATCH', null, '$["iss"]');
+
+  const widened = await mk({
+    iss: a.publicJwk, sub: t.publicJwk,
+    nbf: NOW - 1800, exp: NOW + 1800, aud: ['buoy-01', 'intruder'],
+    maxSamples: 80, transfer: 50, parent: e0.digest,
+  }, a.privateJwk);
+  expectCapReject('浮标范围放宽',
+    { ...base, delegationTexts: [e3.text, e1.text, widened.text, e0.text] },
+    'NOT_TIGHTENED', null, '$["aud"]');
+
+  const tampered = (() => {
+    const v = parseCanonical(e1.text, { requireOrderedKeys: false }).value;
+    v.transfer += 1;
+    return canonicalize(v);
+  })();
+  expectCapReject('改写已签名容量委托',
+    { ...base, delegationTexts: [e3.text, tampered, e2.text, e0.text] }, 'BAD_SIGNATURE');
+
+  expectCapReject('错误根公钥',
+    { ...base, rootKeyText: rootKeyDocument(generateKeyPair().publicJwk),
+      delegationTexts: [e3.text, e1.text, e2.text, e0.text] }, 'ISSUER_NOT_ROOT');
+
+  expectCapReject('目标主体不可达（图中无该密钥）',
+    { ...base, targetText: rootKeyDocument(generateKeyPair().publicJwk),
+      delegationTexts: [e3.text, e1.text, e2.text, e0.text] }, 'TARGET_UNREACHABLE');
+
+  expectCapReject('浮标无生效路径（buoy-02 不被汇入边允许）',
+    { ...base, buoy: 'buoy-02', delegationTexts: [e3.text, e1.text, e2.text, e0.text] },
+    'TARGET_UNREACHABLE');
+
+  // 成环无法用真实签名构造（哈希抗第二原像），以白盒纯函数复核检测器
+  check('findCycle 检出 2-环 / 3-环，DAG 不报错',
+    findCycle([
+      { digest: 'aa'.repeat(32), parent: 'bb'.repeat(32), index: 0 },
+      { digest: 'bb'.repeat(32), parent: 'aa'.repeat(32), index: 1 },
+    ]) &&
+    findCycle([
+      { digest: 'a'.repeat(64), parent: 'c'.repeat(64), index: 0 },
+      { digest: 'b'.repeat(64), parent: 'a'.repeat(64), index: 1 },
+      { digest: 'c'.repeat(64), parent: 'b'.repeat(64), index: 2 },
+    ]) &&
+    findCycle([{ digest: 'r'.repeat(64), parent: '', index: 0 }]) === null);
+
+  // 最大流白盒：割容量恒等于最大流
+  const mf = maxFlow(['s', 'x', 't'], [
+    { id: '1', from: 's', to: 'x', cap: 7 },
+    { id: '2', from: 'x', to: 't', cap: 3 },
+    { id: '3', from: 's', to: 't', cap: 5 },
+  ], 's', 't');
+  check('maxFlow 白盒：最大流 8 且最小割同容量、割边按摘要稳定',
+    mf.total === 8 && mf.cut.length >= 1 &&
+    mf.cut.map((x) => x).join(',') === [...mf.cut].sort().join(','));
+}
+
+// ---------- 6) 代码测试 / 页面检查 ----------
 function run(cmd, args, timeoutMs = 120000) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: rootDir, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -264,7 +425,7 @@ function run(cmd, args, timeoutMs = 120000) {
 }
 
 async function sectionTestsAndPage() {
-  console.log('\n[5/6] 代码测试与页面构建检查');
+  console.log('\n[6/7] 代码测试与页面构建检查');
   const t = await run(process.execPath, ['--test', '--test-concurrency=2', 'tests/']);
   const testCount = (t.out.match(/# tests (\d+)/) || [])[1];
   const passCount = (t.out.match(/# pass (\d+)/) || [])[1];
@@ -307,7 +468,7 @@ async function waitForHealth(port, tries = 60) {
 }
 
 async function smokeGateway(label, target) {
-  console.log(`\n[6/6] 健康地址 API/HTTP 冒烟（${label}）`);
+  console.log(`\n[7/7] 健康地址 API/HTTP 冒烟（${label}）`);
 
   const health = await httpRequest('GET', '/health', target);
   const healthJson = JSON.parse(health.body);
@@ -367,14 +528,61 @@ async function smokeGateway(label, target) {
 
   const badReq = await httpRequest('POST', '/api/verify', { ...target, body: 'not-json' });
   check('POST /api/verify 非法请求体 → 400 BAD_REQUEST', badReq.status === 400);
+
+  // ---- 容量审计 HTTP ----
+  const nowSec = Math.floor(Date.now() / 1000);
+  const rootC = generateKeyPair();
+  const aC = generateKeyPair();
+  const tC = generateKeyPair();
+  const c0 = await issueCapDelegation({
+    iss: rootC.publicJwk, sub: aC.publicJwk,
+    nbf: nowSec - 3600, exp: nowSec + 3600, aud: ['buoy-01'],
+    maxSamples: 30, transfer: 30, parent: '',
+  }, rootC.privateJwk);
+  const c1 = await issueCapDelegation({
+    iss: aC.publicJwk, sub: tC.publicJwk,
+    nbf: nowSec - 1800, exp: nowSec + 1800, aud: ['buoy-01'],
+    maxSamples: 20, transfer: 20, parent: c0.digest,
+  }, aC.privateJwk);
+  const capOkResp = await httpRequest('POST', '/api/capacity', {
+    ...target,
+    body: JSON.stringify({
+      rootKey: rootKeyDocument(rootC.publicJwk),
+      delegations: [c1.text, c0.text], // 乱序
+      target: rootKeyDocument(tC.publicJwk),
+      buoy: 'buoy-01', now: nowSec,
+    }),
+  });
+  const capOkJson = JSON.parse(capOkResp.body);
+  check('POST /api/capacity 合法集合 → 200，最大可转移容量 20 且最小割同容量',
+    capOkResp.status === 200 && capOkJson.ok === true
+    && capOkJson.evidence?.maxTransferable === 20
+    && capOkJson.evidence.minCut?.capacity === 20
+    && Array.isArray(capOkJson.evidence.flowEdges),
+    `status=${capOkResp.status} body=${capOkResp.body.slice(0, 200)}`);
+
+  const capBadBody = JSON.stringify({
+    rootKey: rootKeyDocument(rootC.publicJwk),
+    delegations: [c1.text], // 缺 c0：c1 的 parent 悬空
+    target: rootKeyDocument(tC.publicJwk),
+    buoy: 'buoy-01', now: nowSec,
+  });
+  const capBadResp = await httpRequest('POST', '/api/capacity', { ...target, body: capBadBody });
+  const capBadJson = JSON.parse(capBadResp.body);
+  check('POST /api/capacity 父摘要缺失 → 422 PARENT_NOT_FOUND 并定位该条',
+    capBadResp.status === 422 && capBadJson.ok === false
+    && capBadJson.error.code === 'PARENT_NOT_FOUND'
+    && capBadJson.error.field === '$["parent"]',
+    `status=${capBadResp.status}`);
 }
 
 async function main() {
-  console.log('=== verify：受限委托链复核一次性验收 ===');
+  console.log('=== verify：受限委托链复核 + 容量审计一次性验收 ===');
   sectionValidChain();
   sectionOverPrivileged();
   sectionTamper();
   sectionStructural();
+  await sectionCapacity();
   await sectionTestsAndPage();
 
   const port = Number(process.env.VERIFY_PORT || 18080);

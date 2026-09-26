@@ -409,7 +409,13 @@ export {
   b64urlEncode,
   b64urlDecode,
   jwkThumbprint,
+  jwkEquals,
+  validateJwk,
+  validateAud,
+  importJwk,
   sha256Hex,
   LIMITS,
   MAX_CHAIN_LEN,
+  MAX_OBJECT_BYTES,
+  MAX_BUOY_ID_LEN,
 };

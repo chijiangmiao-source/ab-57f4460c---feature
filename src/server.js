@@ -1,9 +1,10 @@
 'use strict';
 
 // 岸站 HTTP 服务：
-//   GET  /            静态页面（值班员粘贴根公钥与委托链）
-//   GET  /health      健康响应
-//   POST /api/verify  逐跳核验（请求体 {rootKey, objects:[...], now?}）
+//   GET  /                静态页面（值班员粘贴根公钥与委托链 / 容量委托集合）
+//   GET  /health          健康响应
+//   POST /api/verify      单链逐跳核验（请求体 {rootKey, objects:[...], now?}）
+//   POST /api/capacity    容量委托图审计（{rootKey, delegations:[...], target, buoy, now?}）
 //
 // 无任何第三方依赖，便于在受限环境构建运行。
 
@@ -12,11 +13,12 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { verifyChain } from './chain.js';
+import { auditCapacity } from './capacity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
-const MAX_BODY = 512 * 1024;
+const MAX_BODY = 4 * 1024 * 1024; // 容量审计最多 64 条 × 64KB，单链请求同样适用
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -104,6 +106,33 @@ export function createServer() {
         const result = verifyChain({
           rootKeyText: body.rootKey,
           objectTexts: body.objects,
+          now: body.now,
+        });
+        return sendJson(res, result.ok ? 200 : 422, result);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/capacity') {
+        const text = await readBody(req);
+        let body;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          return sendJson(res, 400, {
+            ok: false,
+            error: { code: 'BAD_REQUEST', hop: -1, index: -1, field: null,
+              message: '请求体必须是 JSON：{rootKey, delegations:[...], target, buoy, now?}' },
+          });
+        }
+        if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: { code: 'BAD_REQUEST', hop: -1, index: -1, field: null, message: '请求体必须是 JSON 对象' },
+          });
+        }
+        const result = auditCapacity({
+          rootKeyText: body.rootKey,
+          delegationTexts: body.delegations,
+          targetText: body.target,
+          buoy: body.buoy,
           now: body.now,
         });
         return sendJson(res, result.ok ? 200 : 422, result);

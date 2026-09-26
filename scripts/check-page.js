@@ -44,12 +44,20 @@ async function main() {
   }
   ok('HTML 引用资源声明完整');
 
-  // 关键 UI 元素
+  // 关键 UI 元素（单链核验区）
   for (const id of ['rootKey', 'objects', 'verifyBtn', 'errorPanel', 'evidencePanel', 'hopTable']) {
     if (!html.includes(`id="${id}"`)) fail(`index.html 缺少元素 #${id}`);
   }
   for (const token of ['fetch(', '/api/verify', 'lastValidEvidence']) {
     if (!js.includes(token)) fail(`app.js 缺少关键逻辑：${token}`);
+  }
+  // 容量审计区（与单链分区、独立留存）
+  for (const id of ['capRootKey', 'capDelegations', 'capTarget', 'capBuoy', 'capNow',
+    'capBtn', 'capErrorPanel', 'capEvidencePanel', 'capFlowTable', 'capCut', 'capAllTable']) {
+    if (!html.includes(`id="${id}"`)) fail(`index.html 缺少容量审计元素 #${id}`);
+  }
+  for (const token of ['/api/capacity', 'lastValidCapacityEvidence', 'renderCapacity']) {
+    if (!js.includes(token)) fail(`app.js 缺少容量审计关键逻辑：${token}`);
   }
   if (!css.includes('.panel') || !css.includes('.error')) fail('style.css 缺少关键样式');
   ok('页面关键元素与逻辑齐备（输入 / 错误草稿 / 证据留存）');

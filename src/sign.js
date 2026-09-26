@@ -61,6 +61,33 @@ export function issueCommand({ iss, sub, nbf, exp, aud, maxSamples, buoy, sample
   return canonicalize({ ...payload, sig });
 }
 
+// 构造一条容量委托（cap-delegation）并返回其规范 JSON 文本。
+// parent 为父载荷摘要（hex）；根委托传空串 ''（或省略）。
+// transfer 为本边可转移容量（<= maxSamples）。
+// 返回 { text, digest }：digest 为“去掉 sig 后规范字节”的 SHA-256，
+// 供后继委托填写 parent。
+export function issueCapDelegation(
+  { iss, sub, nbf, exp, aud, maxSamples, transfer, parent = '' },
+  privateJwk,
+) {
+  const payload = {
+    aud: [...aud],
+    exp,
+    iss: { crv: iss.crv, kty: iss.kty, x: iss.x, y: iss.y },
+    maxSamples,
+    nbf,
+    parent,
+    sub: { crv: sub.crv, kty: sub.kty, x: sub.x, y: sub.y },
+    transfer,
+    typ: 'cap-delegation',
+  };
+  const sig = signPayload(payload, privateJwk);
+  const text = canonicalize({ ...payload, sig });
+  const digest = crypto.createHash('sha256')
+    .update(Buffer.from(canonicalize(payload), 'utf8')).digest('hex');
+  return { text, digest };
+}
+
 // 便捷：生成一条 root -> 中间人 -> 命令 的合法链
 export function buildValidChain({ now, buoys = ['buoy-01', 'buoy-02'], maxSamples = 100, samples = 10, buoy } = {}) {
   const t = now ?? Math.floor(Date.now() / 1000);
